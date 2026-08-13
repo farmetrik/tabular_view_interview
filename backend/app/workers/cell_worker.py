@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +21,41 @@ MAX_SUBAGENT_TURNS = 12
 _WEB_SEARCH_TIMEOUT = 20  # seconds for a single Tavily call
 
 _log = logging.getLogger(__name__)
+
+
+async def _publish_event(table_id: str, event: dict) -> None:
+    """Publish a live update without letting Redis corrupt persisted state."""
+    try:
+        await sse.publish(table_id, event)
+    except Exception:
+        _log.exception("Could not publish table event for %s", table_id)
+
+
+async def _finalize_table_if_complete(table_id: str) -> str | None:
+    """Persist and publish the aggregate state once every cell is terminal."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(Cell.status, func.count(Cell.id))
+            .where(Cell.table_id == table_id)
+            .group_by(Cell.status)
+        )
+        counts = dict(result.all())
+        total = sum(counts.values())
+        non_terminal = sum(
+            counts.get(status, 0) for status in ("pending", "queued", "working")
+        )
+        if total == 0 or non_terminal:
+            return None
+
+        status = "failed" if counts.get("failed", 0) == total else "done"
+        table = await db.get(Table, table_id)
+        if table is None or table.status == status:
+            return status if table is not None else None
+        table.status = status
+        await db.commit()
+
+    await _publish_event(table_id, {"type": "table_status", "status": status})
+    return status
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +589,7 @@ async def fill_cell(cell_id: str, _retries: int = MAX_CELL_RETRIES) -> None:
                 )
                 cell.status = "failed"
                 await db.commit()
+                await _finalize_table_if_complete(cell.table_id)
                 return
 
             table_id = cell.table_id
@@ -566,7 +602,7 @@ async def fill_cell(cell_id: str, _retries: int = MAX_CELL_RETRIES) -> None:
             column_output_type = column.output_type
             research_goal = table.research_goal
 
-        await sse.publish(
+        await _publish_event(
             table_id,
             {"type": "cell_working", "rowId": row_id, "columnId": column_id},
         )
@@ -600,7 +636,8 @@ async def fill_cell(cell_id: str, _retries: int = MAX_CELL_RETRIES) -> None:
                 "sources": cell.sources or [],
             }
 
-        await sse.publish(table_id, done_payload)
+        await _publish_event(table_id, done_payload)
+        await _finalize_table_if_complete(table_id)
 
     except Exception as exc:
         if _retries > 0:
@@ -624,7 +661,7 @@ async def fill_cell(cell_id: str, _retries: int = MAX_CELL_RETRIES) -> None:
                 if cell:
                     cell.status = "failed"
                     await db.commit()
-                    await sse.publish(
+                    await _publish_event(
                         cell.table_id,
                         {
                             "type": "cell_failed",
@@ -633,5 +670,6 @@ async def fill_cell(cell_id: str, _retries: int = MAX_CELL_RETRIES) -> None:
                             "error": str(exc),
                         },
                     )
+                    await _finalize_table_if_complete(cell.table_id)
         except SQLAlchemyError:
             _log.exception("Failed to record terminal failure for cell %s", cell_id)

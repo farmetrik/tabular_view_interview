@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { createTable, proposeColumns, startTable, openSSE } from "./api";
+import { createTable, getTable, proposeColumns, startTable, openSSE } from "./api";
 import { Column, ResearchTable, SSEEvent } from "./types";
 import ResearchSetup from "./components/ResearchSetup";
 import ColumnEditor from "./components/ColumnEditor";
@@ -19,24 +19,72 @@ export default function App() {
   const tableId = phase.name === "table" ? phase.table.id : null;
   const tableStatus = phase.name === "table" ? phase.table.status : null;
 
+  useEffect(() => {
+    const restoredTableId = new URLSearchParams(window.location.search).get("table");
+    if (!restoredTableId) return;
+
+    let cancelled = false;
+    getTable(restoredTableId)
+      .then((table) => {
+        if (!cancelled) setPhase({ name: "table", table });
+      })
+      .catch((e) => {
+        if (!cancelled) setError(`Could not restore table: ${String(e)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Own the EventSource via a useEffect keyed on table id + status so it is
   // always cleaned up when the user navigates away, the component unmounts,
   // or the table transitions out of "running".
   useEffect(() => {
     if (!tableId || tableStatus !== "running") return;
 
-    const es = openSSE(tableId);
-    es.onmessage = (evt) => {
-      const event: SSEEvent = JSON.parse(evt.data);
-      setPhase((prev) => {
-        if (prev.name !== "table" || prev.table.id !== tableId) return prev;
-        return { name: "table", table: applySSEEvent(prev.table, event) };
-      });
+    let es: EventSource | null = null;
+    let retryTimer: number | null = null;
+    let cancelled = false;
+
+    const rehydrate = async () => {
+      try {
+        const table = await getTable(tableId);
+        if (!cancelled) setPhase({ name: "table", table });
+      } catch (e) {
+        if (!cancelled) setError(`Could not refresh table: ${String(e)}`);
+      }
     };
-    es.onerror = () => es.close();
+
+    const connect = () => {
+      if (cancelled) return;
+      const connection = openSSE(tableId);
+      es = connection;
+      connection.onopen = rehydrate;
+      connection.onmessage = (evt) => {
+        const event: SSEEvent = JSON.parse(evt.data);
+        setPhase((prev) => {
+          if (prev.name !== "table" || prev.table.id !== tableId) return prev;
+          return { name: "table", table: applySSEEvent(prev.table, event) };
+        });
+      };
+      connection.onerror = () => {
+        connection.close();
+        if (cancelled || connection !== es) return;
+        if (retryTimer === null) {
+          retryTimer = window.setTimeout(() => {
+            retryTimer = null;
+            connect();
+          }, 2000);
+        }
+      };
+    };
+
+    connect();
 
     return () => {
-      es.close();
+      cancelled = true;
+      es?.close();
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
   }, [tableId, tableStatus]);
 
@@ -57,6 +105,7 @@ export default function App() {
     setPhase({ name: "creating" });
     try {
       const table = await createTable(researchGoal, columns);
+      window.history.replaceState(null, "", `?table=${encodeURIComponent(table.id)}`);
       setPhase({ name: "table", table });
     } catch (e) {
       setError(String(e));

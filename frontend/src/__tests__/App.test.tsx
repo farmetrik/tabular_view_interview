@@ -8,6 +8,7 @@ vi.mock("../api", () => ({
   proposeColumns: vi.fn(),
   createTable: vi.fn(),
   startTable: vi.fn(),
+  getTable: vi.fn(),
   openSSE: vi.fn((tableId: string) => new (globalThis as unknown as {
     EventSource: new (url: string) => EventSource;
   }).EventSource(`http://test/tables/${tableId}/events`)),
@@ -38,6 +39,7 @@ const sampleTable: ResearchTable = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.history.replaceState(null, "", "/");
 });
 
 describe("App", () => {
@@ -131,5 +133,46 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText(/strong civil-law background/i)).toBeInTheDocument();
     });
+  });
+
+  it("rehydrates a table id from the URL after refresh", async () => {
+    window.history.replaceState(null, "", "/?table=tbl_xyz");
+    vi.mocked(api.getTable).mockResolvedValue(sampleTable);
+
+    render(<App />);
+
+    await waitFor(() => expect(api.getTable).toHaveBeenCalledWith("tbl_xyz"));
+    expect(await screen.findByRole("button", { name: /start research/i })).toBeInTheDocument();
+  });
+
+  it("reconnects once after repeated SSE errors", async () => {
+    window.history.replaceState(null, "", "/?table=tbl_xyz");
+    vi.mocked(api.getTable).mockResolvedValue({ ...sampleTable, status: "running" });
+
+    render(<App />);
+    await waitFor(() => expect(mockEventSourceInstances).toHaveLength(1));
+
+    vi.useFakeTimers();
+    const firstConnection = mockEventSourceInstances[0];
+    act(() => {
+      firstConnection.emitError();
+      firstConnection.emitError();
+      vi.advanceTimersByTime(2000);
+    });
+    vi.useRealTimers();
+
+    expect(firstConnection.close).toHaveBeenCalledTimes(2);
+    expect(mockEventSourceInstances).toHaveLength(2);
+
+    const secondConnection = mockEventSourceInstances[1];
+    vi.useFakeTimers();
+    act(() => {
+      firstConnection.emitError();
+      vi.advanceTimersByTime(2000);
+    });
+    vi.useRealTimers();
+
+    expect(secondConnection.close).not.toHaveBeenCalled();
+    expect(mockEventSourceInstances).toHaveLength(2);
   });
 });

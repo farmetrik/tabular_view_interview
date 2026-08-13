@@ -20,6 +20,7 @@ MAX_CELL_RETRIES = 2
 MAX_SUBAGENT_TURNS = 12
 _WEB_SEARCH_TIMEOUT = 20  # seconds for a single Tavily call
 NO_VERIFIABLE_EVIDENCE = "No verifiable evidence found"
+MIN_DOCUMENT_SIMILARITY = 0.15
 
 _log = logging.getLogger(__name__)
 
@@ -335,7 +336,11 @@ async def _run_subagent(
                 )
             elif tc.function.name == "semantic_search":
                 k = min(int(args.get("k", 5)), 10)
-                hits = await semantic_search(arbitrator_id, args["query"], k=k)
+                hits = [
+                    hit
+                    for hit in await semantic_search(arbitrator_id, args["query"], k=k)
+                    if hit["score"] >= MIN_DOCUMENT_SIMILARITY
+                ]
                 retrieved_filenames.update(h["filename"] for h in hits)
                 if not hits:
                     content = "No matching chunks found in the corpus."
@@ -447,7 +452,8 @@ async def _run_web_subagent(
 ) -> _SubagentFindings:
     system = (
         "You are a web search specialist. Find information about the arbitrator from "
-        "web sources.\n\n"
+        "web sources. Evidence is valid only when it refers to the exact named "
+        "arbitrator; reject namesakes and ambiguous identity matches.\n\n"
         f"Plan from coordinator:\n{plan}"
     )
     user = (
@@ -471,7 +477,9 @@ async def _run_doc_subagent(
 ) -> _SubagentFindings:
     system = (
         "You are a document analysis specialist. Find information about the arbitrator "
-        "from their indexed document corpus.\n\n"
+        "from their indexed document corpus. Evidence is valid only when it refers "
+        "to the exact named arbitrator; reject namesakes and contradictory identity "
+        "details.\n\n"
         f"Plan from coordinator:\n{plan}"
     )
     user = (
@@ -517,7 +525,8 @@ async def _run_synthesis(
                 "role": "system",
                 "content": (
                     "You synthesize research findings into a final answer for a "
-                    "comparison table cell."
+                    "comparison table cell. Use evidence only when it clearly refers "
+                    "to the exact named arbitrator; namesakes are not the subject."
                 ),
             },
             {

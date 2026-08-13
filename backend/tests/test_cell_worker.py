@@ -101,6 +101,36 @@ async def test_fill_cell_happy_path(session_factory, scripted_openai_factory):
         assert cell.sources == [{"title": "Src", "url": "https://x.test"}]
 
 
+@pytest.mark.asyncio
+async def test_duplicate_task_delivery_runs_the_cell_once(session_factory, monkeypatch):
+    _, _, _, cell_id = await _seed_table_with_one_cell(session_factory)
+    agent_started = asyncio.Event()
+    release_agent = asyncio.Event()
+    calls = 0
+
+    async def fake_agent(**_kwargs):
+        nonlocal calls
+        calls += 1
+        agent_started.set()
+        await release_agent.wait()
+        return {
+            "answer": "Final answer",
+            "confidence": "high",
+            "reasoning": "one execution",
+            "sources": [],
+        }
+
+    monkeypatch.setattr(cell_worker, "_run_agent", fake_agent)
+
+    first_delivery = asyncio.create_task(cell_worker.fill_cell(cell_id))
+    await agent_started.wait()
+    await cell_worker.fill_cell(cell_id)
+    release_agent.set()
+    await first_delivery
+
+    assert calls == 1
+
+
 # ---------------------------------------------------------------------------
 # Retry on transient failure
 # ---------------------------------------------------------------------------

@@ -5,8 +5,9 @@ from typing import Any, Literal
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import sse
 from ..config import settings
@@ -517,11 +518,30 @@ async def _run_agent(
 # Public entry-point - called once per cell via asyncio.create_task()
 # ---------------------------------------------------------------------------
 
+async def _claim_cell_for_work(db: AsyncSession, cell_id: str) -> bool:
+    """Let only one delivery move a queued or retryable cell to working."""
+    result = await db.execute(
+        update(Cell)
+        .where(
+            Cell.id == cell_id,
+            Cell.status.in_(("pending", "queued")),
+        )
+        .values(status="working")
+        .returning(Cell.id)
+    )
+    claimed = result.scalar_one_or_none() is not None
+    await db.commit()
+    return claimed
+
+
 async def fill_cell(cell_id: str, _retries: int = MAX_CELL_RETRIES) -> None:
     try:
         async with async_session() as db:
+            if not await _claim_cell_for_work(db, cell_id):
+                return
+
             cell = await db.get(Cell, cell_id)
-            if cell is None or cell.status in ("working", "done"):
+            if cell is None:
                 return
 
             row = await db.get(Row, cell.row_id)
@@ -545,9 +565,6 @@ async def fill_cell(cell_id: str, _retries: int = MAX_CELL_RETRIES) -> None:
             column_description = column.description
             column_output_type = column.output_type
             research_goal = table.research_goal
-
-            cell.status = "working"
-            await db.commit()
 
         await sse.publish(
             table_id,

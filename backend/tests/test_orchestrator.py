@@ -67,24 +67,60 @@ async def test_start_table_skips_non_pending(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_select_pending_cell_ids(session_factory):
+async def test_start_table_is_idempotent_and_claims_before_dispatch(session_factory):
     table_id, cell_ids = await _seed_table(session_factory)
 
-    async with session_factory() as db:
-        ids = await orchestrator.select_pending_cell_ids(db, table_id)
+    dispatched: list[str] = []
+    with patch("app.orchestrator.enqueue_cell", side_effect=dispatched.append):
+        async with session_factory() as db:
+            table = await db.get(Table, table_id)
+            first_count = await orchestrator.start_table(db, table)
+        async with session_factory() as db:
+            table = await db.get(Table, table_id)
+            second_count = await orchestrator.start_table(db, table)
 
-    assert sorted(ids) == sorted(cell_ids)
+    assert first_count == 2
+    assert second_count == 0
+    assert sorted(dispatched) == sorted(cell_ids)
+
+    async with session_factory() as db:
+        result = await db.execute(select(Cell.status).where(Cell.table_id == table_id))
+        assert result.scalars().all() == ["queued", "queued"]
 
 
 @pytest.mark.asyncio
-async def test_enqueue_cells_returns_count(session_factory):
-    """enqueue_cells should call enqueue_cell for each id and return the count."""
-    dispatched: list[str] = []
-    with patch("app.orchestrator.enqueue_cell", side_effect=dispatched.append):
-        n = orchestrator.enqueue_cells(["a", "b", "c"])
+async def test_start_table_releases_only_tasks_the_broker_rejected(session_factory):
+    table_id, cell_ids = await _seed_table(session_factory)
+    attempts: list[str] = []
 
-    assert n == 3
-    assert dispatched == ["a", "b", "c"]
+    def fail_second_dispatch(cell_id: str) -> None:
+        attempts.append(cell_id)
+        if cell_id == cell_ids[1]:
+            raise RuntimeError("broker unavailable")
+
+    with patch("app.orchestrator.enqueue_cell", side_effect=fail_second_dispatch):
+        async with session_factory() as db:
+            table = await db.get(Table, table_id)
+            with pytest.raises(RuntimeError, match="broker unavailable"):
+                await orchestrator.start_table(db, table)
+
+    async with session_factory() as db:
+        table = await db.get(Table, table_id)
+        cells = (await db.execute(select(Cell).where(Cell.table_id == table_id))).scalars().all()
+        assert table.status == "draft"
+        assert {cell.id: cell.status for cell in cells} == {
+            cell_ids[0]: "queued",
+            cell_ids[1]: "pending",
+        }
+
+    retried: list[str] = []
+    with patch("app.orchestrator.enqueue_cell", side_effect=retried.append):
+        async with session_factory() as db:
+            table = await db.get(Table, table_id)
+            assert await orchestrator.start_table(db, table) == 1
+
+    assert attempts == cell_ids
+    assert retried == [cell_ids[1]]
 
 
 @pytest.mark.asyncio

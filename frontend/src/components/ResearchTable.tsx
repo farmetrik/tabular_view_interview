@@ -19,6 +19,7 @@ function getCell(table: ResearchTable, rowId: string, columnId: string): Cell | 
 
 function CellStatusBadge({ status }: { status: Cell["status"] }) {
   if (status === "pending") return <span className="text-gray-300 text-xs">—</span>;
+  if (status === "queued") return <span className="text-blue-400 text-xs">Queued</span>;
   if (status === "working") {
     return (
       <svg className="animate-spin h-4 w-4 text-amber-500 mx-auto" viewBox="0 0 24 24" fill="none">
@@ -137,6 +138,8 @@ export default function ResearchTableView({ table, onStart }: Props) {
                     >
                       {!cell || cell.status === "pending" ? (
                         <CellStatusBadge status="pending" />
+                      ) : cell.status === "queued" ? (
+                        <CellStatusBadge status="queued" />
                       ) : cell.status === "working" ? (
                         <CellStatusBadge status="working" />
                       ) : cell.status === "failed" ? (

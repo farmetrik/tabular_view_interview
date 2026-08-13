@@ -23,7 +23,7 @@ export interface Cell {
   id: string;
   row_id: string;
   column_id: string;
-  status: "pending" | "working" | "done" | "failed";
+  status: "pending" | "queued" | "working" | "done" | "failed";
   value?: string;
   confidence?: "low" | "medium" | "high";
   reasoning?: string;

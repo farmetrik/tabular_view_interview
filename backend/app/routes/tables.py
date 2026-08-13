@@ -171,7 +171,10 @@ async def start_table(table_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Table not found")
 
     count = await orchestrator.start_table(db, table)
-    return {"status": "started", "cell_count": count}
+    return {
+        "status": "started" if count else "already_started",
+        "cell_count": count,
+    }
 
 
 @router.patch("/{table_id}/columns/{column_id}", response_model=ColumnOut)

@@ -43,7 +43,7 @@ class Cell(Base):
     table_id = Column(String, ForeignKey("tables.id"), nullable=False)
     row_id = Column(String, ForeignKey("rows.id"), nullable=False)
     column_id = Column(String, ForeignKey("columns.id"), nullable=False)
-    status = Column(String, default="pending")  # pending | working | done | failed
+    status = Column(String, default="pending")  # pending | queued | working | done | failed
     value = Column(String)
     confidence = Column(String)
     reasoning = Column(String)

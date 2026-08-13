@@ -437,6 +437,69 @@ async def test_synthesis_keeps_only_retrieved_sources_once():
     assert result["sources"] == [retrieved]
 
 
+@pytest.mark.asyncio
+async def test_required_evidence_returns_explicit_low_confidence_abstention():
+    fake = _ScriptedOpenAI([
+        make_submit_answer_response(
+            answer="Likely answer",
+            confidence="high",
+            reasoning="A plausible guess",
+            sources=[{"title": "Invented", "url": "https://not-retrieved.test"}],
+        )
+    ])
+    web = cell_worker._SubagentFindings(summary="none", sources=[])
+    doc = cell_worker._SubagentFindings(summary="none", sources=[])
+
+    result = await cell_worker._run_synthesis(
+        fake,
+        web_findings=web,
+        doc_findings=doc,
+        arbitrator_name="Vance",
+        column_name="Shoe size",
+        column_description="must be sourced",
+        output_type="short_text",
+        required_evidence=True,
+    )
+
+    assert result["answer"] == "No verifiable evidence found"
+    assert result["confidence"] == "low"
+    assert result["sources"] == []
+    assert "requires direct supporting evidence" in fake.calls[0]["messages"][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_abstention_cannot_keep_high_confidence_from_irrelevant_sources():
+    source = {
+        "kind": "web",
+        "title": "Namesake profile",
+        "url": "https://example.test/namesake",
+    }
+    fake = _ScriptedOpenAI([
+        make_submit_answer_response(
+            answer="No verifiable evidence found.",
+            confidence="high",
+            reasoning="Nothing relevant was found",
+            sources=[source],
+        )
+    ])
+
+    result = await cell_worker._run_synthesis(
+        fake,
+        web_findings=cell_worker._SubagentFindings(
+            summary="Unrelated result", sources=[source]
+        ),
+        doc_findings=cell_worker._SubagentFindings(summary="none", sources=[]),
+        arbitrator_name="Vance",
+        column_name="Shoe size",
+        column_description="must be sourced",
+        output_type="short_text",
+        required_evidence=True,
+    )
+
+    assert result["answer"] == "No verifiable evidence found."
+    assert result["confidence"] == "low"
+
+
 # ---------------------------------------------------------------------------
 # semantic_search tool routing in the subagent loop
 # ---------------------------------------------------------------------------

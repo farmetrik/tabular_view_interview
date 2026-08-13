@@ -19,6 +19,7 @@ MAX_SEARCH_ITERATIONS = 3
 MAX_CELL_RETRIES = 2
 MAX_SUBAGENT_TURNS = 12
 _WEB_SEARCH_TIMEOUT = 20  # seconds for a single Tavily call
+NO_VERIFIABLE_EVIDENCE = "No verifiable evidence found"
 
 _log = logging.getLogger(__name__)
 
@@ -497,11 +498,18 @@ async def _run_synthesis(
     column_name: str,
     column_description: str,
     output_type: str,
+    required_evidence: bool = False,
 ) -> dict:
     summaries_text = (
         f"Web findings: {web_findings.summary}\n\n"
         f"Document findings: {doc_findings.summary}"
     )
+    evidence_instruction = ""
+    if required_evidence:
+        evidence_instruction = (
+            "This column requires direct supporting evidence. If the findings do not "
+            f"directly support an answer, answer exactly: {NO_VERIFIABLE_EVIDENCE}.\n\n"
+        )
     response = await client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
@@ -518,6 +526,7 @@ async def _run_synthesis(
                     f"Arbitrator: {arbitrator_name}\n"
                     f"Column: {column_name} ({output_type}) - {column_description}\n\n"
                     f"{summaries_text}\n\n"
+                    f"{evidence_instruction}"
                     "Call submit_answer with the final answer."
                 ),
             },
@@ -545,6 +554,11 @@ async def _run_synthesis(
     payload.sources = payload_sources
     if not payload.sources:
         payload.confidence = "low"
+        if required_evidence:
+            payload.answer = NO_VERIFIABLE_EVIDENCE
+            payload.reasoning = "The column requires evidence, but no retrieved source supports an answer."
+    if payload.answer.rstrip(". ").casefold() == NO_VERIFIABLE_EVIDENCE.casefold():
+        payload.confidence = "low"
     return payload.model_dump(exclude_none=True)
 
 
@@ -559,6 +573,7 @@ async def _run_agent(
     column_description: str,
     output_type: str,
     research_goal: str,
+    required_evidence: bool = False,
 ) -> dict:
     client = AsyncOpenAI(api_key=settings.openai_api_key)
 
@@ -598,6 +613,7 @@ async def _run_agent(
         column_name=column_name,
         column_description=column_description,
         output_type=output_type,
+        required_evidence=required_evidence,
     )
 
 
@@ -652,6 +668,7 @@ async def fill_cell(cell_id: str, _retries: int = MAX_CELL_RETRIES) -> None:
             column_name = column.name
             column_description = column.description
             column_output_type = column.output_type
+            column_required_evidence = column.required_evidence
             research_goal = table.research_goal
 
         await _publish_event(
@@ -666,6 +683,7 @@ async def fill_cell(cell_id: str, _retries: int = MAX_CELL_RETRIES) -> None:
             column_description=column_description,
             output_type=column_output_type,
             research_goal=research_goal,
+            required_evidence=column_required_evidence,
         )
 
         async with async_session() as db:

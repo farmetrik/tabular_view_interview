@@ -610,3 +610,34 @@ async def test_read_document_registers_its_real_filename(session_factory):
     )
 
     assert [source.filename for source in result.sources] == ["cv.md"]
+
+
+@pytest.mark.asyncio
+async def test_semantic_search_drops_weak_identity_noise(monkeypatch):
+    async def fake_search(*_args, **_kwargs):
+        return [
+            {"filename": "wrong_person.md", "doc_type": "bio", "chunk": "namesake", "score": 0.05},
+            {"filename": "cv.md", "doc_type": "cv", "chunk": "arbitrator", "score": 0.80},
+        ]
+
+    monkeypatch.setattr(cell_worker, "semantic_search", fake_search)
+    responses = iter([
+        make_response(tool_calls=[make_tool_call("semantic_search", {"query": "identity"})]),
+        make_response(tool_calls=[make_tool_call("submit_findings", {
+            "summary": "result",
+            "sources": [
+                {"kind": "document", "filename": "wrong_person.md"},
+                {"kind": "document", "filename": "cv.md"},
+            ],
+        })]),
+    ])
+
+    result = await cell_worker._run_subagent(
+        _ScriptedOpenAI(handler=lambda **_: next(responses)),
+        system="Bind evidence to the exact named arbitrator",
+        user="Named arbitrator: Vance",
+        arbitrator_id="arb",
+        tools=cell_worker._DOC_SUBAGENT_TOOLS,
+    )
+
+    assert [source.filename for source in result.sources] == ["cv.md"]

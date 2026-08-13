@@ -323,14 +323,18 @@ function CellDetailModal({ detail, onClose }: { detail: CellDetail; onClose: () 
               <ul className="space-y-1">
                 {cell.sources.map((src: Source, i: number) => (
                   <li key={i}>
-                    <a
-                      href={src.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-sm text-blue-600 hover:underline"
-                    >
-                      {src.title || src.url}
-                    </a>
+                    {src.kind === "document" || !src.url ? (
+                      <span className="text-sm text-gray-600">{src.filename || src.title}</span>
+                    ) : (
+                      <a
+                        href={src.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm text-blue-600 hover:underline"
+                      >
+                        {src.title || src.url}
+                      </a>
+                    )}
                   </li>
                 ))}
               </ul>

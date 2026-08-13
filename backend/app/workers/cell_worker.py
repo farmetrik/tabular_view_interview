@@ -4,7 +4,7 @@ import logging
 from typing import Any, Literal
 
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -63,15 +63,31 @@ async def _finalize_table_if_complete(table_id: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 class _AnswerSource(BaseModel):
-    title: str = Field(..., min_length=1)
-    url: str = Field(..., min_length=1)
+    kind: Literal["web", "document"] | None = None
+    title: str | None = None
+    url: str | None = None
+    filename: str | None = None
+
+    @model_validator(mode="after")
+    def normalize(self):
+        if self.kind is None:
+            self.kind = "document" if self.filename or (self.url or "").startswith("doc://") else "web"
+        if self.kind == "document":
+            self.filename = self.filename or (self.url or "").removeprefix("doc://") or self.title
+            if not self.filename:
+                raise ValueError("Document sources require a filename")
+            self.url = None
+        elif not self.url:
+            raise ValueError("Web sources require a URL")
+        self.title = self.title or self.filename or self.url
+        return self
 
 
 class _AnswerPayload(BaseModel):
     answer: str = Field(..., min_length=1)
     confidence: Literal["low", "medium", "high"]
     reasoning: str = Field(..., min_length=1)
-    sources: list[_AnswerSource] = Field(..., min_length=1)
+    sources: list[_AnswerSource] = Field(default_factory=list)
 
 
 class _SubagentFindings(BaseModel):
@@ -103,7 +119,9 @@ async def _web_search(query: str) -> list[dict]:
     ]
 
 
-async def _read_document(arbitrator_id: str, doc_type: str) -> str | None:
+async def _read_document(
+    arbitrator_id: str, doc_type: str
+) -> tuple[str, str] | None:
     async with async_session() as db:
         result = await db.execute(
             select(Document).where(
@@ -112,7 +130,7 @@ async def _read_document(arbitrator_id: str, doc_type: str) -> str | None:
             )
         )
         doc = result.scalar_one_or_none()
-        return doc.content if doc else None
+        return (doc.filename, doc.content) if doc else None
 
 
 # ---------------------------------------------------------------------------
@@ -170,10 +188,12 @@ _SUBMIT_FINDINGS_TOOL: dict = {
                     "items": {
                         "type": "object",
                         "properties": {
+                            "kind": {"type": "string", "enum": ["web", "document"]},
                             "title": {"type": "string"},
                             "url": {"type": "string"},
+                            "filename": {"type": "string"},
                         },
-                        "required": ["title", "url"],
+                        "required": ["kind"],
                     },
                 },
             },
@@ -201,10 +221,12 @@ _SUBMIT_ANSWER_TOOL: dict = {
                     "items": {
                         "type": "object",
                         "properties": {
+                            "kind": {"type": "string", "enum": ["web", "document"]},
                             "title": {"type": "string"},
                             "url": {"type": "string"},
+                            "filename": {"type": "string"},
                         },
-                        "required": ["title", "url"],
+                        "required": ["kind"],
                     },
                 },
             },
@@ -262,6 +284,17 @@ async def _run_subagent(
         {"role": "user", "content": user},
     ]
     search_count = 0
+    retrieved_web_urls: set[str] = set()
+    retrieved_filenames: set[str] = set()
+
+    def was_retrieved(source: _AnswerSource) -> bool:
+        if source.kind == "web":
+            return source.url in retrieved_web_urls
+        return source.filename in retrieved_filenames
+
+    def verified(findings: _SubagentFindings) -> _SubagentFindings:
+        sources = [source for source in findings.sources if was_retrieved(source)]
+        return _SubagentFindings(summary=findings.summary, sources=sources)
 
     for _turn in range(MAX_SUBAGENT_TURNS):
         response = await client.chat.completions.create(
@@ -282,7 +315,7 @@ async def _run_subagent(
             args = json.loads(tc.function.arguments)
 
             if tc.function.name == "submit_findings":
-                submitted = _SubagentFindings.model_validate(args)
+                submitted = verified(_SubagentFindings.model_validate(args))
                 break
 
             if tc.function.name == "web_search":
@@ -290,6 +323,7 @@ async def _run_subagent(
                     content = "Web search limit reached. Call submit_findings now."
                 else:
                     results = await _web_search(args["query"])
+                    retrieved_web_urls.update(r["url"] for r in results)
                     search_count += 1
                     content = "\n\n".join(
                         f"**{r['title']}**\n{r['url']}\n{r['content']}"
@@ -301,6 +335,7 @@ async def _run_subagent(
             elif tc.function.name == "semantic_search":
                 k = min(int(args.get("k", 5)), 10)
                 hits = await semantic_search(arbitrator_id, args["query"], k=k)
+                retrieved_filenames.update(h["filename"] for h in hits)
                 if not hits:
                     content = "No matching chunks found in the corpus."
                 else:
@@ -312,14 +347,16 @@ async def _run_subagent(
                     {"role": "tool", "tool_call_id": tc.id, "content": content}
                 )
             elif tc.function.name == "read_document":
-                doc_content = await _read_document(arbitrator_id, args["doc_type"])
-                if doc_content is None:
+                document = await _read_document(arbitrator_id, args["doc_type"])
+                if document is None:
                     content = (
                         f"No document of type '{args['doc_type']}' available. "
                         "Try a different doc_type."
                     )
                 else:
-                    content = doc_content
+                    filename, content = document
+                    retrieved_filenames.add(filename)
+                    content = f"**{filename}**\n{content}"
                 tool_results.append(
                     {"role": "tool", "tool_call_id": tc.id, "content": content}
                 )
@@ -349,9 +386,9 @@ async def _run_subagent(
                     summary="Search limit reached and no findings could be extracted.",
                     sources=[],
                 )
-            return _SubagentFindings.model_validate(
+            return verified(_SubagentFindings.model_validate(
                 json.loads(forced_calls[0].function.arguments)
-            )
+            ))
 
     return _SubagentFindings(
         summary="Subagent exceeded turn budget without submitting findings.",
@@ -491,9 +528,24 @@ async def _run_synthesis(
     tool_calls = response.choices[0].message.tool_calls or []
     if not tool_calls:
         raise RuntimeError("Synthesis model did not call submit_answer.")
-    return _AnswerPayload.model_validate(
+    payload = _AnswerPayload.model_validate(
         json.loads(tool_calls[0].function.arguments)
-    ).model_dump()
+    )
+    verified_sources = {
+        (source.kind, source.url, source.filename): source
+        for source in [*web_findings.sources, *doc_findings.sources]
+    }
+    payload_sources: list[_AnswerSource] = []
+    seen_sources: set[tuple[str | None, str | None, str | None]] = set()
+    for source in payload.sources:
+        key = (source.kind, source.url, source.filename)
+        if key in verified_sources and key not in seen_sources:
+            payload_sources.append(verified_sources[key])
+            seen_sources.add(key)
+    payload.sources = payload_sources
+    if not payload.sources:
+        payload.confidence = "low"
+    return payload.model_dump(exclude_none=True)
 
 
 # ---------------------------------------------------------------------------

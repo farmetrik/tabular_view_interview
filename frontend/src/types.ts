@@ -15,8 +15,10 @@ export interface Row {
 }
 
 export interface Source {
+  kind?: "web" | "document";
   title: string;
-  url: string;
+  url?: string;
+  filename?: string;
 }
 
 export interface Cell {

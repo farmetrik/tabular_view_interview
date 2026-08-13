@@ -48,8 +48,10 @@ class RowOut(BaseModel):
 
 
 class Source(BaseModel):
+    kind: str = "web"
     title: str
-    url: str
+    url: Optional[str] = None
+    filename: Optional[str] = None
 
 
 class CellOut(BaseModel):

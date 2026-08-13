@@ -96,9 +96,9 @@ async def test_fill_cell_happy_path(session_factory, scripted_openai_factory):
         cell = await db.get(Cell, cell_id)
         assert cell.status == "done"
         assert cell.value == "Final answer"
-        assert cell.confidence == "high"
+        assert cell.confidence == "low"
         assert cell.reasoning == "combined evidence"
-        assert cell.sources == [{"title": "Src", "url": "https://x.test"}]
+        assert cell.sources == []
         table = await db.get(Table, "t1")
         assert table.status == "done"
 
@@ -405,6 +405,38 @@ async def test_run_synthesis_raises_when_no_tool_calls():
         )
 
 
+@pytest.mark.asyncio
+async def test_synthesis_keeps_only_retrieved_sources_once():
+    retrieved = {"kind": "web", "title": "Court", "url": "https://court.test"}
+    fake = _ScriptedOpenAI([
+        make_submit_answer_response(
+            answer="Supported answer",
+            confidence="high",
+            reasoning="Court record",
+            sources=[
+                retrieved,
+                retrieved,
+                {"kind": "web", "title": "Invented", "url": "https://fake.test"},
+            ],
+        )
+    ])
+
+    result = await cell_worker._run_synthesis(
+        fake,
+        web_findings=cell_worker._SubagentFindings(
+            summary="Court record", sources=[retrieved]
+        ),
+        doc_findings=cell_worker._SubagentFindings(summary="none", sources=[]),
+        arbitrator_name="Vance",
+        column_name="Background",
+        column_description="background",
+        output_type="short_text",
+    )
+
+    assert result["confidence"] == "high"
+    assert result["sources"] == [retrieved]
+
+
 # ---------------------------------------------------------------------------
 # semantic_search tool routing in the subagent loop
 # ---------------------------------------------------------------------------
@@ -452,3 +484,39 @@ async def test_run_subagent_routes_semantic_search_tool_call(monkeypatch):
     assert captured == {"arb": "arb_42", "query": "education background", "k": 3}
     assert "Yale" in result.summary
     assert len(fake.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_read_document_registers_its_real_filename(session_factory):
+    async with session_factory() as db:
+        db.add(Document(
+            arbitrator_id="arb_42",
+            doc_type="cv",
+            filename="cv.md",
+            content="Yale 1991",
+        ))
+        await db.commit()
+
+    responses = iter([
+        make_response(tool_calls=[make_tool_call(
+            "read_document", {"doc_type": "cv"}, call_id="read"
+        )]),
+        make_response(tool_calls=[make_tool_call(
+            "submit_findings",
+            {
+                "summary": "Yale 1991",
+                "sources": [{"kind": "document", "filename": "cv.md"}],
+            },
+            call_id="submit",
+        )]),
+    ])
+
+    result = await cell_worker._run_subagent(
+        _ScriptedOpenAI(handler=lambda **_: next(responses)),
+        system="sys",
+        user="user",
+        arbitrator_id="arb_42",
+        tools=cell_worker._DOC_SUBAGENT_TOOLS,
+    )
+
+    assert [source.filename for source in result.sources] == ["cv.md"]

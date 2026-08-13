@@ -586,23 +586,25 @@ async def _run_agent(
         research_goal=research_goal,
     )
 
-    web_findings = await _run_web_subagent(
-        client,
-        plan=plan,
-        arbitrator_id=arbitrator_id,
-        arbitrator_name=row_name,
-        column_name=column_name,
-        column_description=column_description,
-        output_type=output_type,
-    )
-    doc_findings = await _run_doc_subagent(
-        client,
-        plan=plan,
-        arbitrator_id=arbitrator_id,
-        arbitrator_name=row_name,
-        column_name=column_name,
-        column_description=column_description,
-        output_type=output_type,
+    web_findings, doc_findings = await asyncio.gather(
+        _run_web_subagent(
+            client,
+            plan=plan,
+            arbitrator_id=arbitrator_id,
+            arbitrator_name=row_name,
+            column_name=column_name,
+            column_description=column_description,
+            output_type=output_type,
+        ),
+        _run_doc_subagent(
+            client,
+            plan=plan,
+            arbitrator_id=arbitrator_id,
+            arbitrator_name=row_name,
+            column_name=column_name,
+            column_description=column_description,
+            output_type=output_type,
+        ),
     )
 
     return await _run_synthesis(

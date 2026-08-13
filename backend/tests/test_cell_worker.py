@@ -500,6 +500,33 @@ async def test_abstention_cannot_keep_high_confidence_from_irrelevant_sources():
     assert result["confidence"] == "low"
 
 
+@pytest.mark.asyncio
+async def test_agent_runs_independent_subagents_concurrently(monkeypatch):
+    both_started = asyncio.Event()
+    started: set[str] = set()
+
+    async def fake_planner(*_args, **_kwargs):
+        return "plan"
+
+    async def subagent(name: str):
+        started.add(name)
+        if len(started) == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=0.2)
+        return cell_worker._SubagentFindings(summary=name, sources=[])
+
+    async def fake_synthesis(*_args, **_kwargs):
+        return {"answer": "ok", "confidence": "low", "reasoning": "test", "sources": []}
+
+    monkeypatch.setattr(cell_worker, "_run_planner", fake_planner)
+    monkeypatch.setattr(cell_worker, "_run_web_subagent", lambda *_a, **_k: subagent("web"))
+    monkeypatch.setattr(cell_worker, "_run_doc_subagent", lambda *_a, **_k: subagent("doc"))
+    monkeypatch.setattr(cell_worker, "_run_synthesis", fake_synthesis)
+
+    await cell_worker._run_agent("arb", "Name", "Column", "Description", "short_text", "goal")
+    assert started == {"web", "doc"}
+
+
 # ---------------------------------------------------------------------------
 # semantic_search tool routing in the subagent loop
 # ---------------------------------------------------------------------------

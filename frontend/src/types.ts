@@ -61,7 +61,12 @@ export interface CellFailedEvent {
   error: string;
 }
 
-export type SSEEvent = CellWorkingEvent | CellDoneEvent | CellFailedEvent;
+export interface TableStatusEvent {
+  type: "table_status";
+  status: "done" | "failed";
+}
+
+export type SSEEvent = CellWorkingEvent | CellDoneEvent | CellFailedEvent | TableStatusEvent;
 
 export interface ArbitratorDocument {
   id: string;

@@ -99,4 +99,15 @@ describe("applySSEEvent", () => {
     // original table not mutated
     expect(table.cells[0].status).toBe("pending");
   });
+
+  it("applies an aggregate table_status event", () => {
+    const table = makeTable([
+      makeCell({ id: "cell_r1_c1", row_id: "r1", column_id: "c1", status: "done" }),
+    ]);
+
+    const next = applySSEEvent(table, { type: "table_status", status: "done" });
+
+    expect(next.status).toBe("done");
+    expect(next.cells).toBe(table.cells);
+  });
 });

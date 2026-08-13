@@ -46,6 +46,7 @@ export default function ResearchTableView({ table, onStart }: Props) {
   const [detail, setDetail] = useState<CellDetail | null>(null);
   const [docsFor, setDocsFor] = useState<Row | null>(null);
   const isRunning = table.status === "running";
+  const isTerminal = table.status === "done" || table.status === "failed";
 
   const pendingCount = table.cells.filter((c) => c.status === "pending").length;
   const doneCount = table.cells.filter((c) => c.status === "done").length;
@@ -67,7 +68,7 @@ export default function ResearchTableView({ table, onStart }: Props) {
           )}
           <button
             onClick={() => onStart(table.id)}
-            disabled={isRunning}
+            disabled={isRunning || isTerminal}
             className="px-5 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {isRunning && (
@@ -76,7 +77,15 @@ export default function ResearchTableView({ table, onStart }: Props) {
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
               </svg>
             )}
-            {isRunning ? "Running..." : pendingCount === total ? "Start Research" : "Restart"}
+            {isRunning
+              ? "Running..."
+              : table.status === "done"
+              ? "Research complete"
+              : table.status === "failed"
+              ? "Research failed"
+              : pendingCount === total
+              ? "Start Research"
+              : "Restart"}
           </button>
         </div>
       </div>

@@ -99,6 +99,61 @@ async def test_fill_cell_happy_path(session_factory, scripted_openai_factory):
         assert cell.confidence == "high"
         assert cell.reasoning == "combined evidence"
         assert cell.sources == [{"title": "Src", "url": "https://x.test"}]
+        table = await db.get(Table, "t1")
+        assert table.status == "done"
+
+
+@pytest.mark.asyncio
+async def test_finalize_table_waits_for_all_cells_and_marks_partial_success_done(
+    session_factory,
+):
+    async with session_factory() as db:
+        table = Table(id="t-final", research_goal="goal", status="running")
+        row = Row(id="r-final", table_id=table.id, arbitrator_id="arb", name="Name")
+        col_a = TableColumn(id="c-a", table_id=table.id, name="A")
+        col_b = TableColumn(id="c-b", table_id=table.id, name="B")
+        db.add_all([
+            table,
+            row,
+            col_a,
+            col_b,
+            Cell(id="cell-a", table_id=table.id, row_id=row.id, column_id=col_a.id, status="done"),
+            Cell(id="cell-b", table_id=table.id, row_id=row.id, column_id=col_b.id, status="working"),
+        ])
+        await db.commit()
+
+    assert await cell_worker._finalize_table_if_complete("t-final") is None
+
+    async with session_factory() as db:
+        cell_b = await db.get(Cell, "cell-b")
+        cell_b.status = "failed"
+        await db.commit()
+
+    assert await cell_worker._finalize_table_if_complete("t-final") == "done"
+    async with session_factory() as db:
+        table = await db.get(Table, "t-final")
+        assert table.status == "done"
+
+
+@pytest.mark.asyncio
+async def test_redis_failure_does_not_undo_completed_work(
+    session_factory, scripted_openai_factory, monkeypatch
+):
+    _, _, _, cell_id = await _seed_table_with_one_cell(session_factory)
+    scripted_openai_factory(_happy_path_responses())
+
+    async def redis_unavailable(*_args, **_kwargs):
+        raise ConnectionError("redis unavailable")
+
+    monkeypatch.setattr(cell_worker.sse, "publish", redis_unavailable)
+
+    await cell_worker.fill_cell(cell_id)
+
+    async with session_factory() as db:
+        cell = await db.get(Cell, cell_id)
+        table = await db.get(Table, "t1")
+        assert cell.status == "done"
+        assert table.status == "done"
 
 
 @pytest.mark.asyncio

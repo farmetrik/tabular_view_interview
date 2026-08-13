@@ -104,4 +104,16 @@ describe("ResearchTableView", () => {
     });
     expect(screen.getByText(/Source documents/i)).toBeInTheDocument();
   });
+
+  it("shows a disabled completion action for a done table", () => {
+    render(<ResearchTableView table={{ ...table, status: "done" }} onStart={() => {}} />);
+
+    expect(screen.getByRole("button", { name: /research complete/i })).toBeDisabled();
+  });
+
+  it("does not offer a restart when every cell failed", () => {
+    render(<ResearchTableView table={{ ...table, status: "failed" }} onStart={() => {}} />);
+
+    expect(screen.getByRole("button", { name: /research failed/i })).toBeDisabled();
+  });
 });

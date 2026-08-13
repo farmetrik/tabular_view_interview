@@ -123,6 +123,10 @@ export default function App() {
 }
 
 export function applySSEEvent(table: ResearchTable, event: SSEEvent): ResearchTable {
+  if (event.type === "table_status") {
+    return { ...table, status: event.status };
+  }
+
   const updatedCells = table.cells.map((cell) => {
     if (cell.row_id !== event.rowId || cell.column_id !== event.columnId) return cell;
 
